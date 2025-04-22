@@ -22,8 +22,8 @@ DOCUMENTATION = """
 ---
 module: dcnm_fabric_member
 short_description: Manage addition and deletion of NDFC fabrics to MSD.
-version_added: "3.5.0"
-author: Prabahal (@prabahal)
+version_added: "3.9.0"
+author: Prabahal (@prabahal), Mike Wiebe (@mikewiebe)
 description:
 - Create, Delete, Query NDFC child fabrics.
 options:
@@ -31,6 +31,7 @@ options:
         choices:
         - deleted
         - merged
+        - overridden
         - query
         default: merged
         description:
@@ -48,57 +49,60 @@ options:
                 - Save the member fabric configuration.
                 required: false
                 type: bool
-            FABRIC_NAME:
+            multisite_fabric_name:
                 description:
                 - The name of the MSD fabric.
                 required: true
                 type: str
-            CHILD_FABRIC_NAME:
+            child_fabrics:
                 description:
-                - The child fabric of MSD fabric.
-                required: true
-                type: str
+                - A list of child fabric configuration dictionaries
+                type: list
+                elements: dict
+                suboptions:
+                    child_fabric_name::
+                        description:
+                        - The child fabric of MSD fabric.
+                        required: true
+                        type: str
 """
 
 EXAMPLES = """
 
-- name: add child fabrics to MSD
+- name: Add Child Fabrics to Mulstisite Fabric"
   cisco.dcnm.dcnm_fabric_member:
-    state: merged
-    config:
-    -   FABRIC_NAME: MSD_Parent1
-        CHILD_FABRIC_NAME: child1
-    -   FABRIC_NAME: MSD_Parent2
-        CHILD_FABRIC_NAME: child2
-    -   FABRIC_NAME: MSD_Parent2
-        CHILD_FABRIC_NAME: child3
+  state: merged
+  config:
+    - multisite_fabric_name: MSD_1
+      child_fabrics:
+        - child_fabric_name: child_11
+        - child_fabric_name: child_12
+        - child_fabric_name: child_13
   register: result
 - debug:
     var: result
 
-# Query the child fabrics of a MSD Fabric.
-
-- name: Query the child fabrics of MSD fabrics.
+- name: Query Child Fabrics of Mulstisite Fabric"
   cisco.dcnm.dcnm_fabric_member:
     state: query
     config:
-    -   FABRIC_NAME: MSD_Fabric1
-    -   FABRIC_NAME: MSD_Fabric2
-    -   FABRIC_NAME: MSD_Fabric3
+    - multisite_fabric_name: MSD_1
+      child_fabrics:
+        - child_fabric_name: child_11
+        - child_fabric_name: child_12
+        - child_fabric_name: child_13
   register: result
 - debug:
     var: result
 
-# Delete the fabrics.
-
-- name: Delete the fabrics.
+- name: Delete Child Fabrics from Mulstisite Fabric"
   cisco.dcnm.dcnm_fabric:
     state: deleted
     config:
-    -   FABRIC_NAME: MSD_Parent1
-        CHILD_FABRIC_NAME: child1
-    -   FABRIC_NAME: MSD_Parent2
-        CHILD_FABRIC_NAME: child2
+    - multisite_fabric_name: MSD_1
+      child_fabrics:
+        - child_fabric_name: child_11
+        - child_fabric_name: child_12
   register: result
 - debug:
     var: result
@@ -144,9 +148,14 @@ class childCommon():
 
         self.params = params
 
+        self.log.debug("MGW: Calling populate_check_mode()")
         self.populate_check_mode()
+        self.log.debug("MGW: Calling populate_config()")
         self.populate_state()
+        self.log.debug("MGW: Calling populate_state()")
         self.populate_config()
+
+        self.log.debug("MGW: Finished populate_state()")
 
         self.results = Results()
         self.results.state = self.state
@@ -169,7 +178,7 @@ class childCommon():
             else:
                 invalid_fab = item["destFabric"]
                 msg = f"{self.class_name}: {method_name}: "
-                msg += f"Playbook configuration for FABRIC_NAME {invalid_fab} "
+                msg += f"Playbook configuration for multisite_fabric_name {invalid_fab} "
                 msg += "is not found in Controller. Please create and try again"
                 raise ValueError(msg)
 
@@ -181,7 +190,7 @@ class childCommon():
                     if (self.data[fabric]['fabricType'] != "MSD"):
                         invalid_fab = item["destFabric"]
                         msg = f"{self.class_name}: {method_name}: "
-                        msg += f"Playbook configuration for FABRIC_NAME {invalid_fab} "
+                        msg += f"Playbook configuration for multisite_fabric_name {invalid_fab} "
                         msg += "is not of type MSD"
                         raise ValueError(msg)
 
@@ -224,10 +233,22 @@ class childCommon():
             msg = f"{self.class_name}.{method_name}: "
             msg += "params is missing config parameter."
             raise ValueError(msg)
+
+        # Playbook config example
+        #   - multisite_fabric_name: MSD_1
+        #     child_fabrics:
+        #       - child_fabric_name: child_11
+        #       - child_fabric_name: child_12
         fab_member_spec = dict(
-            FABRIC_NAME=dict(required=True, type="str"),
-            CHILD_FABRIC_NAME=dict(required=True, type="str"),
-            DEPLOY=dict(type="bool", default=False),
+            multisite_fabric_name=dict(required=True, type="str"),
+            deploy=dict(type="bool", default=False),
+            child_fabrics=dict(
+                type="list",
+                elements="dict",
+                options=dict(
+                    child_fabric_name=dict(required=True, type="str"),
+                ),
+            ),
         )
 
         fab_mem_info, invalid_params = validate_list_of_dicts(self.config, fab_member_spec, None)
@@ -235,6 +256,7 @@ class childCommon():
             msg = f"Invalid parameters in playbook: {invalid_params} "
             msg += "while processing config \n"
             raise ValueError(msg)
+
         for config in self.config:
             if not isinstance(config, dict):
                 msg = f"{self.class_name}.{method_name}: "
@@ -242,29 +264,93 @@ class childCommon():
                 msg += f"Got type {type(config).__name__}, "
                 msg += f"value {config}."
                 raise ValueError(msg)
-            msd_fabric = config.get("FABRIC_NAME", None)
-            child_fabric = config.get("CHILD_FABRIC_NAME", None)
-            try:
-                self.conversion.validate_fabric_name(msd_fabric)
-                self.conversion.validate_fabric_name(child_fabric)
-            except (TypeError, ValueError) as error:
-                msg = f"{self.class_name}: "
-                msg += "Playbook configuration for FABRIC_NAME or CHILD_FABRIC_NAME "
-                msg += "contains an invalid FABRIC_NAME. "
-                msg += f"Error detail: {error} "
-                msg += f"Bad configuration: {config}."
-                raise ValueError(msg) from error
+
+            if "multisite_fabric_name" not in config.keys():
+                msg = f"{self.class_name}.{method_name}: "
+                msg += "Playbook configuration for multisite_fabric_name is missing."
+                raise ValueError(msg)
+            if "child_fabrics" not in config.keys():
+                msg = f"{self.class_name}.{method_name}: "
+                msg += "Playbook configuration for child_fabrics is missing."
+                raise ValueError(msg)
+
+            msite_fabric = config.get("multisite_fabric_name")
+            self._validate_intput_fabric_name("multisite_fabric_name", msite_fabric)
+
+            child_fabrics = config.get("child_fabrics")
+            if not isinstance(child_fabrics, list):
+                msg = f"{self.class_name}.{method_name}: "
+                msg += "Playbook configuration for child_fabrics must be a list"
+                raise ValueError(msg)
+
+            if len(child_fabrics) == 0:
+                msg = f"{self.class_name}.{method_name}: "
+                msg += "Playbook configuration for child_fabrics is empty."
+                raise ValueError(msg)
+
+            for child_fab in child_fabrics:
+                if not isinstance(child_fab, dict):
+                    msg = f"{self.class_name}.{method_name}: "
+                    msg += "Playbook configuration for a single child fabric must be a dict. "
+                    msg += f"Got type {type(child_fab).__name__}, "
+                    msg += f"value {child_fab}."
+                    raise ValueError(msg)
+
+                child_fabric = child_fab.get("child_fabric_name", None)
+                self._validate_intput_fabric_name("child_fabric_name", child_fabric)
+
+    def _validate_intput_fabric_name(self, fabric_key, fabric_name):
+        method_name = inspect.stack()[0][3]
+        try:
+            self.conversion.validate_fabric_name(fabric_name)
+        except (TypeError, ValueError) as error:
+            msg = f"{self.class_name}: "
+            msg += f"Playbook configuration for {fabric_key} name is missing or "
+            msg += "contains an invalid name. "
+            msg += f"Error detail: {error} "
+            msg += f"Bad configuration: {fabric_name}."
+            raise ValueError(msg) from error
 
     def get_want(self):
         method_name = inspect.stack()[0][3]
         for config in self.config:
             msg = f"{method_name} payload: {config}"
             self.log.debug(msg)
-            msd_fabric = config.get("FABRIC_NAME", None)
-            child_fabric = config.get("CHILD_FABRIC_NAME", None)
             deploy = config.get("DEPLOY", None)
-            config_payload = {'destFabric': msd_fabric, 'sourceFabric': child_fabric, 'DEPLOY': deploy}
-            self.payloads.append(copy.deepcopy(config_payload))
+            msd_fabric_name = config.get("multisite_fabric_name")
+
+            for child_fab in config.get("child_fabrics"):
+                child_fabric_name = child_fab.get("child_fabric_name")
+                config_payload = {'destFabric': msd_fabric_name, 'sourceFabric': child_fabric_name, 'DEPLOY': deploy}
+                self.payloads.append(copy.deepcopy(config_payload))
+
+    def get_fabric_association(self):
+        """
+        ### Summary
+        Get the fabric association data from the controller.
+
+        ### Raises
+        -   ``ValueError`` if the controller returns an error when attempting to
+            retrieve the fabric association data.
+        """
+        method_name = inspect.stack()[0][3]
+        try:
+            self.fab_association = FabricAssociations()
+            self.fab_association.rest_send = self.rest_send
+            self.fab_association.refresh()
+        except (TypeError, ValueError) as error:
+            raise ValueError(error) from error
+
+        msg = f"Fab association data{self.fab_association.fabric_association_data}"
+        self.log.debug(msg)
+        self.refresh_fab_association_data()
+
+    def refresh_fab_association_data(self):
+        for item in self.fab_association.fabric_association_data:
+            fabric_name = item.get("fabricName", None)
+            if fabric_name is None:
+                continue
+            self.data[fabric_name] = item
 
     def populate_check_mode(self):
         """
@@ -288,11 +374,11 @@ class childCommon():
 
         ### Raises
         -   ValueError if:
-                -   ``state`` is "merged" or "deleted" and ``config`` is None.
+                -   ``state`` is "merged" or "overridden" or "deleted" and ``config`` is None.
                 -   ``config`` is not a list.
         """
         method_name = inspect.stack()[0][3]
-        states_requiring_config = {"merged", "deleted"}
+        states_requiring_config = {"merged", "overridden", "deleted"}
         self.config = self.params.get("config", None)
         if self.state in states_requiring_config:
             if self.config is None:
@@ -317,7 +403,7 @@ class childCommon():
         """
         method_name = inspect.stack()[0][3]
 
-        valid_states = ["deleted", "merged", "query"]
+        valid_states = ["deleted", "merged", "overridden", "query"]
 
         self.state = self.params.get("state", None)
         if self.state is None:
@@ -383,7 +469,7 @@ class Deleted(childCommon):
     def commit(self) -> None:
         """
         ### Summary
-        delete the fabrics in ``self.want`` that exist on the controller.
+        Remove the child fabric associations in ``self.want`` under the multisite fabric.
 
         ### Raises
 
@@ -397,16 +483,7 @@ class Deleted(childCommon):
         self.validate_input()
         self.get_want()
 
-        try:
-            self.fab_association = FabricAssociations()
-            self.fab_association.rest_send = self.rest_send
-            self.fab_association.refresh()
-        except (TypeError, ValueError) as error:
-            raise ValueError(error) from error
-
-        msg = f"Fab association data{self.fab_association.fabric_association_data}"
-        self.log.debug(msg)
-        self.refresh_fab_association_data()
+        self.get_fabric_association()
 
         self.verify_msd_fab_exists_in_controller()
         self.verify_msd_fab_type()
@@ -472,23 +549,18 @@ class Merged(childCommon):
 
         self.log = logging.getLogger(f"dcnm.{self.class_name}")
         self.add = childFabricAdd()
+        self.add.results = self.results
+
         msg = "ENTERED child fabric merged(): "
         msg += f"state: {self.results.state}, "
         msg += f"check_mode: {self.results.check_mode}"
         self.log.debug(msg)
         self.data = {}
 
-    def refresh_fab_association_data(self):
-        for item in self.fab_association.fabric_association_data:
-            fabric_name = item.get("fabricName", None)
-            if fabric_name is None:
-                continue
-            self.data[fabric_name] = item
-
     def commit(self) -> None:
         """
         ### Summary
-        Add the fabrics in ``self.payloads`` that exist on the controller.
+        Add the child fabric associations in ``self.want`` under the multisite fabric.
 
         ### Raises
 
@@ -504,17 +576,7 @@ class Merged(childCommon):
         self.validate_input()
         self.get_want()
 
-        self.add.results = self.results
-        try:
-            self.fab_association = FabricAssociations()
-            self.fab_association.rest_send = self.rest_send
-            self.fab_association.refresh()
-        except (TypeError, ValueError) as error:
-            raise ValueError(error) from error
-
-        msg = f"Fab association data{self.fab_association.fabric_association_data}"
-        self.log.debug(msg)
-        self.refresh_fab_association_data()
+        self.get_fabric_association()
 
         self.verify_msd_fab_exists_in_controller()
         self.verify_msd_fab_type()
@@ -552,6 +614,108 @@ class Merged(childCommon):
                 self.refresh_fab_association_data()
 
 
+
+class Overridden(Merged):
+    """
+    ### Summary
+    Handle overridden state for adding and removing child fabric associations.
+
+    ### Raises
+
+    -   ``ValueError`` if:
+        -   The playbook parameters are invalid.
+        -   The controller returns an error when attempting to retrieve
+            the fabric details.
+    """
+
+    def __init__(self, params):
+        self.class_name = self.__class__.__name__
+        super().__init__(params)
+
+        self.action = "child_fabric_override"
+        self._implemented_states.add("overridden")
+
+        self.log = logging.getLogger(f"dcnm.{self.class_name}")
+        # self.add = childFabricAdd()
+        self.supported_child_fabric_types = ["External", "Switch_Fabric"]
+        msg = "ENTERED child fabric overridden(): "
+        msg += f"state: {self.results.state}, "
+        msg += f"check_mode: {self.results.check_mode}"
+        self.log.debug(msg)
+
+        self.data = {}
+
+    def commit(self) -> None:
+        """
+        ### Summary
+        Add the child fabric associations in ``self.want`` under the multisite fabric.
+        Remove the child fabric associations NOT in ``self.want`` under the multisite fabric.
+
+        ### Raises
+
+        -   ``ValueError`` if the controller returns an error when attempting to
+            add the fabrics.
+        """
+        method_name = inspect.stack()[0][3]
+
+        msg = f"ENTERED: {self.class_name}.{method_name}"
+        self.log.debug(msg)
+
+        # First call Merged.commit() to add the child fabrics
+        Merged.commit(self)
+
+        # Create a set of parent fabric names from the playbook config
+        pb_parent_fab_names = set()
+        for item in self.payloads:
+            pb_parent_fab_names.add(item["destFabric"])
+
+        # Create a set of child fabric names from the playbook config
+        pb_child_fab_names = set()
+        for item in self.payloads:
+            pb_child_fab_names.add(item["sourceFabric"])
+
+        # Sample entry in self.data:
+        # {'fabricId': 3, 'fabricName': 'child_11', 'fabricType': 'Switch_Fabric', 'fabricState': 'member', 'fabricParent': 'MSD_1', 'fabricTechnology': 'VXLANFabric'}
+        #
+        delete_payloads = []
+        for key in self.data.keys():
+
+            parent_fabric_name = self.data[key]['fabricParent']
+            if parent_fabric_name == 'None':
+                continue
+
+            child_fabric_name = self.data[key]['fabricName']
+            fabric_type = self.data[key]['fabricType']
+            if child_fabric_name not in pb_child_fab_names:
+                if parent_fabric_name in pb_parent_fab_names:
+                    # This child fabric is not in the playbook, so we need to delete it
+                    delete_payloads.append({'destFabric': parent_fabric_name, 'sourceFabric': child_fabric_name})
+            if parent_fabric_name not in pb_parent_fab_names and fabric_type in self.supported_child_fabric_types:
+                # This parent fabric is not in the playbook, so we need to delete the child fabrics
+                delete_payloads.append({'destFabric': parent_fabric_name, 'sourceFabric': child_fabric_name})
+
+        for item in delete_payloads:
+            self.delete = childFabricDelete()
+            self.delete.rest_send = self.rest_send
+            self.delete.rest_send.check_mode = self.check_mode
+            self.delete.results = self.results
+
+            fabric_names_to_delete = []
+            for want in self.payloads:
+                fabric_names_to_delete.append(want["destFabric"])
+            try:
+                self.delete.fabric_names = fabric_names_to_delete
+            except ValueError as error:
+                raise ValueError(f"{error}") from error
+
+            try:
+                self.delete.commit(item)
+            except ValueError as error:
+                raise ValueError(f"{error}") from error
+            self.fab_association.refreshed = False
+            self.fab_association.refresh()
+            self.refresh_fab_association_data()
+
 class Query(childCommon):
     """
     ### Summary
@@ -581,17 +745,17 @@ class Query(childCommon):
     def verify_payload(self):
         if self.config is None:
             msg = f"{self.class_name}: "
-            msg += "Playbook configuration for FABRIC_NAME is missing"
+            msg += "Playbook configuration for multisite_fabric_name is missing"
             raise ValueError(msg)
         for config in self.config:
             try:
-                fabric_name = config.get("FABRIC_NAME", None)
+                fabric_name = config.get("multisite_fabric_name", None)
                 try:
                     self.conversion.validate_fabric_name(fabric_name)
                 except (TypeError, ValueError) as error:
                     msg = f"{self.class_name}: "
-                    msg += "Playbook configuration for FABRIC_NAME is missing or "
-                    msg += "contains an invalid FABRIC_NAME. "
+                    msg += "Playbook configuration for multisite_fabric_name is missing or "
+                    msg += "contains an invalid multisite_fabric_name. "
                     msg += f"Error detail: {error} "
                     msg += f"Bad configuration: {config}."
                     raise ValueError(msg) from error
@@ -651,7 +815,7 @@ def main():
     argument_spec["config"] = {"required": False, "type": "list", "elements": "dict"}
     argument_spec["state"] = {
         "default": "merged",
-        "choices": ["deleted", "merged", "query"],
+        "choices": ["deleted", "merged", "overridden", "query"],
     }
 
     ansible_module = AnsibleModule(
@@ -671,13 +835,22 @@ def main():
     rest_send = RestSend(params)
     rest_send.response_handler = ResponseHandler()
     rest_send.sender = sender
+
+    mylog = logging.getLogger(f"dcnm.main")
+
     try:
         task = None
         if params["state"] == "merged":
+            mylog.debug("Processing State Merged")
             task = Merged(params)
+        elif params["state"] == "overridden":
+            mylog.debug("Processing State Overridden")
+            task = Overridden(params)
         elif params["state"] == "deleted":
+            mylog.debug("Processing State Deleted")
             task = Deleted(params)
         elif params["state"] == "query":
+            mylog.debug("Processing State Query")
             task = Query(params)
 
         if task is None:
@@ -685,7 +858,10 @@ def main():
         task.rest_send = rest_send
         task.commit()
     except ValueError as error:
-        ansible_module.fail_json(f"{error}", **task.results.failed_result)
+        if task is not None:
+            ansible_module.fail_json(f"{error}", **task.results.failed_result)
+        else:
+            ansible_module.fail_json(f"{error}")
 
     task.results.build_final_result()
 
