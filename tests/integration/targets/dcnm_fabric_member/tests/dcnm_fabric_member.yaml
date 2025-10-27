@@ -562,6 +562,8 @@
 #    ]
 #}
 
+- meta: end_play
+
 ################################################################################
 - name: MERGED - TEST - Merge child fabrics into MSD Fabric
   cisco.dcnm.dcnm_fabric_member:
